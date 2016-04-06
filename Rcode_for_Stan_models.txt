@@ -1,0 +1,118 @@
+#Author: Natalia Levshina, Leipzig University
+#Version: 06.04.2016
+#This file contains the R and Stan code for fitting logistic mixed-effects models with random intercepts. 
+#See the details about the data and the variables in the presentation Levshina_Leuven2016.pdf in the same directory.
+#The data sets for each regional variety can be found in help_xx.RData, where xx stands for the bigram code of each variety as represented in Mark Davies' GloWbE corpus.
+#If you use the data or this code, please cite the following presentation: Natalia Levshina (2016) "Help + (to) Infinitive in twenty geographic varieties of web-based English: A Bayesian mixed-model approach". Paper presented at the workshop "Probabilistic variation across dialects and varieties", April 4-5 2016. University of Leuven, Belgium.
+#Hierarchical random intercept structure Register/textID will be implemented in the next version.
+#This code and data are for academic use only and come with no warranty. If you have questions and suggestions, please contact the author: natalevs@gmail.com.
+
+#an example for the Australian variety of web-based English
+
+library(rstan)
+
+#Stan model specification
+
+help_logit_mixed <- "
+data {
+  int<lower=1> D;             // num fixed effects (without intercept) 
+  int<lower=0> N;             // num observations 
+  matrix[N, D] x;              // fixed effects 
+  int<lower=0,upper=1> y[N];  // response with categorical outcomes
+  int<lower=1> V; //number of verbs (infinitives) - random intercepts
+  int<lower=1> F; //number of corpus files - random intercepts		
+  int<lower=1, upper=V> verbs[N]; //verb id - random intercepts
+  int<lower=1, upper=F> files[N]; //corpus file id - random intercepts
+} 
+
+
+parameters { 
+  vector[D] beta;     // slopes of fixed effects
+  vector[V] v; //random intercepts (verbs)
+  vector[F] f; //random intercepts (files)
+  real<lower=0> sigma_v; //random intercepts (verbs)
+  real<lower=0> sigma_f; ////random intercepts (files)
+} 
+
+
+model { 
+  // priors 
+  beta ~ uniform(-10, 10);
+  v ~ normal(0, sigma_v);
+  f ~ normal(0, sigma_f); 
+  // likelihood
+  for (n in 1:N)	 
+    y[n] ~ bernoulli_logit(x[n]*beta + v[verbs[n]] + f[files[n]]); 
+}
+
+generated quantities {
+vector[N] log_lik;
+vector[N] yhat;
+for (n in 1:N){
+    log_lik[n] <- bernoulli_logit_log(y[n], x[n]*beta + v[verbs[n]] + f[files[n]]);
+}
+for (n in 1:N){
+	yhat[n] <- x[n]*beta + v[verbs[n]] + f[files[n]]; 
+}
+} 
+"
+
+#Model matrix
+
+x.mat <- model.matrix(~ V1_POS + scale(Middle_Length) + Helpee_bin + ToHelp + EPVal + scale(Collostr) + scale(WordLength) + scale(Middle_Length):ToHelp, data = au_all) 
+y <- as.numeric(au_all$To) - 1
+ 
+#data specification
+
+full_data <- list(N = nrow(x.mat),
+                   D = ncol(x.mat),
+                   y = y,
+                   x = x.mat,
+                   V = nlevels(au_all$Vinf),
+                   F = nlevels(as.factor(au_all$textID)), 
+                   verbs = as.integer(au_all$Vinf),	
+                   files = as.integer(as.factor(au_all$textID)))		
+
+
+#fitting the model with Stan
+
+fit_Collostr <- stan(model_code = help_logit_mixed, data = full_data,  iter = 2000, chains = 4)
+
+
+#Model coefficients
+
+res.au.collostr <- as.data.frame(summary(fit_Collostr)$summary)
+res.au.collostr[1:13, c(1, 4, 8)]
+
+
+#Predictive accuracy measure
+
+pred <- summary(fit_Collostr, pars = "yhat")$summary[, 1]
+prob <- exp(pred)/(1 + exp(pred))
+
+prob1 <- prob
+prob1[prob1 > 0.5] <- "To"
+prob1[prob1 < 0.5] <- "Bare"
+prob1 <- as.factor(prob1)
+predpower.au <- (table(prob1, au_all$To)[1, 1] + table(prob1, au_all$To)[2, 2])/nrow(au_all)
+predpower.au
+
+#LOOIC and WAIC
+
+library(loo)
+log_lik <- extract_log_lik(fit_Collostr)
+print(loo(log_lik))
+print(waic(log_lik))
+
+#Traceplot for diagnostics of chain mixing and convergence
+
+traceplot(fit_Collostr, pars = "beta", inc_warmup = FALSE)
+
+#Posterior distributions
+
+betas.au <- extract(fit_Collostr, pars = "beta")
+betas.au <- betas.au$beta
+	
+mean(betas.au[, 1] > 0) #Intercept
+mean(betas.au[, 2] > 0) #First predictor
+#etc.
